@@ -1,5 +1,5 @@
 --// =========================================================
---// AUTO LMB — ANTI-CURVE + SLOW BALL FIX + SAFE MINI UI
+--// AUTO LMB — ANTI-CURVE + SLOW BALL FIX + MACRO + SAFE MINI UI
 --// =========================================================
 
 local cloneref = cloneref or function(o) return o end
@@ -36,6 +36,9 @@ end
 --// CONFIG
 local Config = {
     Enabled = false,
+    MacroEnabled = false,
+    MacroDelay = 0.0001,         -- Delay spam LMB 0.1 ms (0.0001 detik)
+
     BaseTimeToImpact = 0.25,     -- Waktu reaksi dasar tetap (tanpa Ping)
     ExtremeSpeedThreshold = 300, -- Batas kecepatan bola ekstrem
     FastBonusTime = 0.05,        -- Bonus waktu reaksi saat speed >= 300
@@ -90,7 +93,7 @@ if getgenv then getgenv()._alUI = gui end
 
 local main = Instance.new("Frame")
 main.Name = RandName()
-main.Size = UDim2.new(0, 200, 0, 62)
+main.Size = UDim2.new(0, 200, 0, 94)
 main.Position = UDim2.new(0.5, -100, 0.12, 0)
 main.BackgroundColor3 = Color3.fromRGB(15, 12, 22)
 main.BorderSizePixel = 0
@@ -115,10 +118,23 @@ toggleBtn.Text = S("ENABLE : OFF [DEL]")
 toggleBtn.Parent = main
 Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 5)
 
+local macroBtn = Instance.new("TextButton")
+macroBtn.Name = RandName()
+macroBtn.Size = UDim2.new(1, -16, 0, 26)
+macroBtn.Position = UDim2.new(0, 8, 0, 38)
+macroBtn.BackgroundColor3 = Color3.fromRGB(30, 24, 42)
+macroBtn.AutoButtonColor = false
+macroBtn.Font = Enum.Font.GothamBold
+macroBtn.TextSize = 11
+macroBtn.TextColor3 = Color3.fromRGB(243, 235, 255)
+macroBtn.Text = S("MACRO [HOLD E] : OFF")
+macroBtn.Parent = main
+Instance.new("UICorner", macroBtn).CornerRadius = UDim.new(0, 5)
+
 local statusLabel = Instance.new("TextLabel")
 statusLabel.Name = RandName()
 statusLabel.Size = UDim2.new(1, -16, 0, 18)
-statusLabel.Position = UDim2.new(0, 8, 0, 38)
+statusLabel.Position = UDim2.new(0, 8, 0, 70)
 statusLabel.BackgroundTransparency = 1
 statusLabel.Font = Enum.Font.Gotham
 statusLabel.TextSize = 10
@@ -166,25 +182,6 @@ circleAdorn.CFrame = CFrame.Angles(math.rad(90), 0, 0) * CFrame.new(0, 0, 2.7)
 circleAdorn.Visible = false
 circleAdorn.Parent = gui
 
-local function UpdateToggle(state)
-    Config.Enabled = state
-    toggleBtn.Text = state and S("ENABLE : ON [DEL]") or S("ENABLE : OFF [DEL]")
-    toggleBtn.BackgroundColor3 = state and Color3.fromRGB(168, 85, 247) or Color3.fromRGB(30, 24, 42)
-end
-
-toggleBtn.MouseButton1Click:Connect(function()
-    UpdateToggle(not Config.Enabled)
-end)
-
-UserInputService.InputBegan:Connect(function(input, gp)
-    if gp then return end
-    if input.KeyCode == Enum.KeyCode.RightShift then
-        gui.Enabled = not gui.Enabled
-    elseif input.KeyCode == Enum.KeyCode.Delete then
-        UpdateToggle(not Config.Enabled)
-    end
-end)
-
 --// PARRY LOGIC & CURVE TRACKERS
 local Parried = false
 local LastParryTime = 0
@@ -192,6 +189,7 @@ local LastTarget = ""
 local LastBallDir = nil
 local SmoothedCurveRate = 0
 local lastUIUpdate = 0
+local IsMacroHolding = false
 
 local HasMouse1Click = (type(mouse1click) == "function")
 local HasMouseMove = (type(mousemoverel) == "function")
@@ -234,12 +232,74 @@ local function TriggerParry()
     end
 end
 
+local function UpdateToggle(state)
+    Config.Enabled = state
+    toggleBtn.Text = state and S("ENABLE : ON [DEL]") or S("ENABLE : OFF [DEL]")
+    toggleBtn.BackgroundColor3 = state and Color3.fromRGB(168, 85, 247) or Color3.fromRGB(30, 24, 42)
+end
+
+local function UpdateMacroToggle(state)
+    Config.MacroEnabled = state
+    if not state then
+        IsMacroHolding = false
+    end
+    macroBtn.Text = state and S("MACRO [HOLD E] : ON") or S("MACRO [HOLD E] : OFF")
+    macroBtn.BackgroundColor3 = state and Color3.fromRGB(168, 85, 247) or Color3.fromRGB(30, 24, 42)
+end
+
+toggleBtn.MouseButton1Click:Connect(function()
+    UpdateToggle(not Config.Enabled)
+end)
+
+macroBtn.MouseButton1Click:Connect(function()
+    UpdateMacroToggle(not Config.MacroEnabled)
+end)
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        gui.Enabled = not gui.Enabled
+    elseif input.KeyCode == Enum.KeyCode.Delete then
+        UpdateToggle(not Config.Enabled)
+    elseif input.KeyCode == Enum.KeyCode.E then
+        if Config.MacroEnabled and not IsMacroHolding then
+            IsMacroHolding = true
+            task.spawn(function()
+                while IsMacroHolding and Config.MacroEnabled and UserInputService:IsKeyDown(Enum.KeyCode.E) do
+                    TriggerParry()
+                    task.wait(Config.MacroDelay)
+                end
+                IsMacroHolding = false
+                if not Config.Enabled then
+                    statusLabel.Text = S("Idle | R:-- | S:--")
+                end
+            end)
+        end
+    end
+end)
+
+UserInputService.InputEnded:Connect(function(input)
+    if input.KeyCode == Enum.KeyCode.E then
+        IsMacroHolding = false
+    end
+end)
+
 --// MAIN LOOP
 RunService.PreSimulation:Connect(function(dt)
     local hrp = GetHRP()
     if circleAdorn and hrp then
         circleAdorn.Adornee = hrp
         circleAdorn.Visible = Config.Enabled and Config.ShowCircle
+    end
+
+    -- Jika E sedang di-hold (Macro aktif), hentikan sementara Auto Parry otomatis
+    if IsMacroHolding then
+        local now = os.clock()
+        if now - lastUIUpdate > 0.1 then
+            lastUIUpdate = now
+            statusLabel.Text = S("MACRO SPAMMING [E]")
+        end
+        return
     end
 
     if not Config.Enabled or not hrp then return end
