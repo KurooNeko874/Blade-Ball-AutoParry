@@ -1,5 +1,5 @@
 --// =========================================================
---// AUTO LMB — ANTI-CURVE + SLOW BALL FIX + MACRO + SAFE MINI UI
+--// AUTO LMB — ANTI-CURVE + SLOW BALL + MACRO + TRAINING & ABILITY
 --// =========================================================
 
 local cloneref = cloneref or function(o) return o end
@@ -186,10 +186,12 @@ circleAdorn.Parent = gui
 local Parried = false
 local LastParryTime = 0
 local LastTarget = ""
+local LastBallInstance = nil
 local LastBallDir = nil
 local SmoothedCurveRate = 0
 local lastUIUpdate = 0
 local IsMacroHolding = false
+local WasBallStoppedOrAway = false
 
 local HasMouse1Click = (type(mouse1click) == "function")
 local HasMouseMove = (type(mousemoverel) == "function")
@@ -197,15 +199,6 @@ local HasMouseMove = (type(mousemoverel) == "function")
 local function GetHRP()
     local char = LocalPlayer.Character
     return char and char:FindFirstChild("HumanoidRootPart") or nil
-end
-
-local function GetRealBall()
-    local ballsFolder = workspace:FindFirstChild("Balls")
-    if not ballsFolder then return nil end
-    for _, ball in ipairs(ballsFolder:GetChildren()) do
-        if ball:GetAttribute("realBall") then return ball end
-    end
-    return nil
 end
 
 local function GetBallVelocity(ball)
@@ -216,6 +209,66 @@ local function GetBallVelocity(ball)
         if zoomies:IsA("LinearVelocity") then return zoomies.VectorVelocity end
     end
     return ball.AssemblyLinearVelocity or Vector3.zero
+end
+
+-- Deteksi apakah bola mengincar LocalPlayer (Normal, Ability, & Training)
+local function IsBallTargetingMe(ball, isTraining)
+    local target = ball:GetAttribute("target") or ""
+    if target == LocalPlayer.Name or target == LocalPlayer.DisplayName then
+        return true
+    end
+    -- Di TrainingBalls, kadang atribut target kosong atau bernilai khusus saat memantul dari tembok
+    if isTraining and target == "" then
+        return true
+    end
+    return false
+end
+
+-- Ambil bola aktif terbaik dari Workspace.Balls (Normal/Ability) & Workspace.TrainingBalls (Training)
+local function GetRealBall(hrp)
+    local bestBall = nil
+    local bestIsTraining = false
+    local bestScore = math.huge
+
+    local folders = {
+        { folder = workspace:FindFirstChild("Balls"), isTraining = false },
+        { folder = workspace:FindFirstChild("TrainingBalls"), isTraining = true },
+    }
+
+    for _, entry in ipairs(folders) do
+        local folder = entry.folder
+        local isTraining = entry.isTraining
+        if folder then
+            for _, obj in ipairs(folder:GetChildren()) do
+                local ball = obj:IsA("BasePart") and obj or (obj:IsA("Model") and obj.PrimaryPart) or nil
+                if ball then
+                    local realAttr = obj:GetAttribute("realBall")
+                    if realAttr == nil then realAttr = ball:GetAttribute("realBall") end
+
+                    -- Validasi bola asli:
+                    -- Di Balls: wajib realBall == true (atau punya zoomies jika atribut belum diset)
+                    -- Di TrainingBalls: selama bukan realBall == false (bayangan palsu)
+                    local isValid = (realAttr == true)
+                        or (isTraining and realAttr ~= false)
+                        or (realAttr == nil and (ball:FindFirstChild("zoomies") ~= nil))
+
+                    if isValid then
+                        local dist = hrp and (hrp.Position - ball.Position).Magnitude or 9999
+                        local targetingMe = IsBallTargetingMe(obj, isTraining) or IsBallTargetingMe(ball, isTraining)
+                        -- Prioritaskan bola yang sedang menargetkan kita & jaraknya paling dekat (penting untuk Multi-Ball Ability)
+                        local score = targetingMe and dist or (dist + 10000)
+                        if score < bestScore then
+                            bestScore = score
+                            bestBall = ball
+                            bestIsTraining = isTraining
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    return bestBall, bestIsTraining
 end
 
 local function TriggerParry()
@@ -304,12 +357,23 @@ RunService.PreSimulation:Connect(function(dt)
 
     if not Config.Enabled or not hrp then return end
 
-    local ball = GetRealBall()
+    local ball, isTrainingBall = GetRealBall(hrp)
     if not ball then
         Parried = false
+        LastBallInstance = nil
         LastBallDir = nil
         SmoothedCurveRate = 0
+        WasBallStoppedOrAway = false
         return
+    end
+
+    -- Reset tracker jika berganti objek bola (misal di Multi-Ball Ability)
+    if ball ~= LastBallInstance then
+        Parried = false
+        LastBallInstance = ball
+        LastBallDir = nil
+        SmoothedCurveRate = 0
+        WasBallStoppedOrAway = false
     end
 
     local ballVelocity = GetBallVelocity(ball)
@@ -347,7 +411,6 @@ RunService.PreSimulation:Connect(function(dt)
     if rawSpeed >= Config.ExtremeSpeedThreshold then
         activeReactionTime = activeReactionTime + Config.FastBonusTime
     elseif rawSpeed <= Config.SlowSpeedThreshold then
-        -- Tambah kepekaan saat bola berjalan lambat agar tidak kena badan duluan
         local slowRatio = math.clamp(1 - (rawSpeed / Config.SlowSpeedThreshold), 0, 1)
         activeReactionTime = activeReactionTime + (Config.SlowBonusTime * slowRatio)
     end
@@ -369,14 +432,29 @@ RunService.PreSimulation:Connect(function(dt)
         circleAdorn.Color3 = isCurvingHard and Color3.fromRGB(255, 140, 50) or Color3.fromRGB(170, 80, 255)
     end
 
-    local currentTarget = ball:GetAttribute("target") or ""
-    local isTargeting = (currentTarget == LocalPlayer.Name) or (currentTarget == LocalPlayer.DisplayName)
+    local currentTarget = ball:GetAttribute("target") or (ball.Parent and ball.Parent:GetAttribute("target")) or ""
+    local isTargeting = (currentTarget == LocalPlayer.Name)
+        or (currentTarget == LocalPlayer.DisplayName)
+        or (isTrainingBall and currentTarget == "" and closingSpeed > 2 and alignmentDot >= 0.25)
 
+    -- Reset status Parried jika:
+    -- a) Target berubah
+    -- b) Bola di-freeze / dihentikan di udara atau sempat menjauh lalu ditembak ulang oleh Ability (Telekinesis/Rapture/Pull)
+    -- c) Sudah lewat batas FallbackReset
     if currentTarget ~= LastTarget then
         Parried = false
         LastTarget = currentTarget
-    elseif Parried and (os.clock() - LastParryTime) >= Config.FallbackReset then
-        Parried = false
+        WasBallStoppedOrAway = false
+    elseif Parried then
+        if rawSpeed <= 3 or closingSpeed < -5 then
+            WasBallStoppedOrAway = true
+        elseif WasBallStoppedOrAway and closingSpeed > 10 and alignmentDot > 0.3 then
+            Parried = false
+            WasBallStoppedOrAway = false
+        elseif (os.clock() - LastParryTime) >= Config.FallbackReset then
+            Parried = false
+            WasBallStoppedOrAway = false
+        end
     end
 
     if isTargeting and rawSpeed > 2 then
@@ -391,7 +469,7 @@ RunService.PreSimulation:Connect(function(dt)
             Parried = true
             LastParryTime = os.clock()
 
-        -- KONDISI 2: Normal, Slow, Fast, & Anti-Curve Parry
+        -- KONDISI 2: Normal, Slow, Fast, Training, & Anti-Curve Parry
         elseif not Parried and isHeadingToUs and distance <= dynamicRadius and timeToImpact <= activeReactionTime then
             TriggerParry()
             Parried = true
@@ -406,7 +484,7 @@ RunService.PreSimulation:Connect(function(dt)
         lastUIUpdate = now
         local stateText = "Idle"
         if isTargeting then
-            stateText = isCurvingHard and "CURVE!" or "TARGET"
+            stateText = isCurvingHard and "CURVE!" or (isTrainingBall and "TRAIN" or "TARGET")
         end
         statusLabel.Text = S(string.format("%s | R:%d | S:%d", stateText, dynamicRadius, rawSpeed))
     end
